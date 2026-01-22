@@ -78,10 +78,10 @@ class Downloader:
         self.status_callback = status_callback
         self.finished_callback = finished_callback
 
-    def start(self, url, folder, filename, fmt):
-        threading.Thread(target=self._run, args=(url, folder, filename, fmt), daemon=True).start()
+    def start(self, url, folder, filename, fmt, browser="chrome"):
+        threading.Thread(target=self._run, args=(url, folder, filename, fmt, browser), daemon=True).start()
 
-    def _run(self, url, folder, filename, fmt):
+    def _run(self, url, folder, filename, fmt, browser):
         y_path = Config.get_ytdlp_path()
         a_path = Config.get_aria2_path()
         f_path = Config.get_ffmpeg_path()
@@ -99,13 +99,20 @@ class Downloader:
             "--progress-template", "%(progress._percent_str)s", # 只輸出百分比
             "--no-check-certificate", # 忽略 SSL 憑證錯誤
             "--legacy-server-connect",
-            "--cookies-from-browser", "chrome", # 自動讀取 Chrome 的登入狀態，也可改為 edge, firefox
+            # "--cookies-from-browser", "chrome", # 讀取 Chrome 登入狀態（需先關閉 Chrome）
             "--windows-filenames",            # 防止存檔字元報錯
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36", # 偽裝成瀏覽器
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", # 偽裝成瀏覽器
             "--referer", "https://istudy.way-to-win.com/", # 嘗試加入 Referer
-            "--referer", "https://www.eyny.com/",
-            
         ]
+
+        # Cookie 處理策略
+        # 1. 優先尋找目錄下的 cookies.txt (推薦，最穩定)
+        # 2. 如果沒有，才嘗試直接讀取 Chrome (需要關閉瀏覽器)
+        local_cookie = os.path.join(Config.get_app_path(), "cookies.txt")
+        if os.path.exists(local_cookie):
+            cmd.extend(["--cookies", local_cookie])
+        elif browser and browser.lower() != "none":
+            cmd.extend(["--cookies-from-browser", browser])
 
         if os.path.exists(a_path):
             cmd.extend(["--external-downloader", a_path, "--external-downloader-args", "aria2c:-x 16 -k 1M -j 16"])
@@ -124,12 +131,22 @@ class Downloader:
                 if not line and p.poll() is not None: break
                 if "%" in line:
                     try:
-                        val = float(re.sub(r'\x1b\[[0-9;]*m', '', line).replace('%', '').strip())
-                        self.progress_callback(val)
-                        self.status_callback(f"下載中... {val:.1f}%")
+                        # 優化進度條解析邏輯，使用正則表達式抓取百分比數字
+                        # 這樣無論是 yt-dlp 原生格式還是 aria2 的格式都能正確抓到
+                        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line) # 移除顏色碼
+                        match = re.search(r'(\d+\.?\d*)%', clean_line)
+                        if match:
+                            val = float(match.group(1))
+                            self.progress_callback(val)
+                            self.status_callback(f"下載中... {val:.1f}%")
                     except: pass
             if p.returncode == 0: self.finished_callback(True, "下載成功！")
-            else: self.finished_callback(False, f"失敗: {p.stderr.read()}")
+            else: 
+                err = p.stderr.read()
+                # 針對 Chrome 鎖定問題提供中文提示
+                if "Could not copy Chrome cookie database" in err:
+                    err = "抓取 Cookie 失敗！\n請「完全關閉 Chrome 瀏覽器」後再試。\n(或是使用 cookies.txt 方式)"
+                self.finished_callback(False, f"失敗: {err}")
         except Exception as e: self.finished_callback(False, str(e))
 
 class App:
@@ -160,29 +177,38 @@ class App:
         self.filename_entry = ttk.Entry(frame, width=50)
         self.filename_entry.grid(column=0, row=4, sticky=tk.W)
 
+        # 瀏覽器選擇 (新增)
+        ttk.Label(frame, text="登入來源 (若 Chrome 失敗請改用 Edge):").grid(column=0, row=5, sticky=tk.W, pady=(10, 0))
+        self.browser_var = tk.StringVar(value="chrome")
+        browser_frame = ttk.Frame(frame)
+        browser_frame.grid(column=0, row=6, sticky=tk.W)
+        ttk.Radiobutton(browser_frame, text="Chrome", variable=self.browser_var, value="chrome").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(browser_frame, text="Edge", variable=self.browser_var, value="edge").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(browser_frame, text="Firefox", variable=self.browser_var, value="firefox").pack(side=tk.LEFT)
+
         # 格式
-        ttk.Label(frame, text="選擇下載格式:").grid(column=0, row=5, sticky=tk.W)
+        ttk.Label(frame, text="選擇下載格式:").grid(column=0, row=7, sticky=tk.W, pady=(10, 0))
         self.format_var = tk.StringVar(value="MP3")
-        ttk.Radiobutton(frame, text="MP3 (音訊)", variable=self.format_var, value="MP3").grid(column=0, row=5, sticky=tk.W)
-        ttk.Radiobutton(frame, text="WAV (無損音訊)", variable=self.format_var, value="WAV").grid(column=0, row=6, sticky=tk.W)
-        ttk.Radiobutton(frame, text="MP4 (最高畫質影片)", variable=self.format_var, value="MP4").grid(column=0, row=7, sticky=tk.W)
+        ttk.Radiobutton(frame, text="MP3 (音訊)", variable=self.format_var, value="MP3").grid(column=0, row=8, sticky=tk.W)
+        ttk.Radiobutton(frame, text="WAV (無損音訊)", variable=self.format_var, value="WAV").grid(column=0, row=9, sticky=tk.W)
+        ttk.Radiobutton(frame, text="MP4 (最高畫質影片)", variable=self.format_var, value="MP4").grid(column=0, row=10, sticky=tk.W)
 
         # 資料夾
         self.folder_var = tk.StringVar(value=os.getcwd())
-        ttk.Label(frame, text="下載位置:").grid(column=0, row=8, sticky=tk.W, pady=(15, 0))
-        ttk.Entry(frame, textvariable=self.folder_var, width=50).grid(column=0, row=9, sticky=tk.W)
-        ttk.Button(frame, text="瀏覽...", command=self.choose_folder).grid(column=0, row=10, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="下載位置:").grid(column=0, row=11, sticky=tk.W, pady=(15, 0))
+        ttk.Entry(frame, textvariable=self.folder_var, width=50).grid(column=0, row=12, sticky=tk.W)
+        ttk.Button(frame, text="瀏覽...", command=self.choose_folder).grid(column=0, row=13, sticky=tk.W, pady=5)
 
         # 下載按鈕與進度條
         self.download_btn = ttk.Button(frame, text="開始下載", command=self.start_download, state="disabled")
-        self.download_btn.grid(column=0, row=11, pady=15)
+        self.download_btn.grid(column=0, row=14, pady=15)
 
         self.progress_var = tk.DoubleVar(value=0)
         self.progressbar = ttk.Progressbar(frame, length=400, variable=self.progress_var)
-        self.progressbar.grid(column=0, row=12, pady=5)
+        self.progressbar.grid(column=0, row=15, pady=5)
 
         self.status_label = ttk.Label(frame, text="初始化中...")
-        self.status_label.grid(column=0, row=13)
+        self.status_label.grid(column=0, row=16)
 
     def start_check(self):
         def _task():
@@ -199,7 +225,7 @@ class App:
         url = self.url_entry.get().strip()
         if not url: return
         self.download_btn.config(state="disabled")
-        self.downloader.start(url, self.folder_var.get(), self.filename_entry.get().strip(), self.format_var.get())
+        self.downloader.start(url, self.folder_var.get(), self.filename_entry.get().strip(), self.format_var.get(), self.browser_var.get())
 
     def update_progress(self, val): self.progress_var.set(val)
     def update_status(self, text): self.status_label.config(text=text)
